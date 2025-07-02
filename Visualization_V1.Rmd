@@ -1,0 +1,224 @@
+---
+title: ''
+output: html_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,message = FALSE)
+
+library(pacman)
+
+p_load("tidyverse", "rmarkdown", "ggpubr", "ggspatial", "cowplot", "sjPlot",
+       "here","gridExtra","rmapshaper",  "readxl", "plotly", "ggalluvial",
+       "MASS", "nlme", "mgcv","data.table", "kableExtra","gtsummary",
+       "Hmisc","arsenal","imputeTS","zoo","patchwork", "reactable", "leaflet",
+       "rnaturalearth", "sf","tidygeocoder")
+
+orygen_colors <- c(
+  "Yes" = "#009E73",             # green
+  "No" = "#D55E00",              # red
+  "Mixed/Unclear" = "#999999"    # grey
+)
+
+```
+
+<style type="text/css">
+div.main-container {
+  max-width: 1300px !important;
+}
+</style>
+
+
+```{r}
+dta <- read_excel("WIP Summary table_V3.xlsx")
+
+dta<-dta %>%
+  mutate(
+    StudySettingGroup = case_when(
+      str_detect(`Study setting`, regex("secondary school|classroom|college|university", ignore_case = TRUE)) ~ "Education setting-based",
+      str_detect(`Study setting`, regex("clinic|health|counseling|hospital", ignore_case = TRUE)) ~ "Clinic/Health service",
+      str_detect(`Study setting`, regex("home|family", ignore_case = TRUE)) ~ "Home-based",
+      str_detect(`Study setting`, regex("smartphone|website|app|online|wechat|videoconferencing|text|platform|self-directed|email|phone", ignore_case = TRUE)) ~ "Digital/Online",
+      TRUE ~ "Other"
+    ),
+    DeliveryFormat = case_when(
+      str_detect(`Individual or group delivery`, regex("group", ignore_case = TRUE)) ~ "Group-based",
+      str_detect(`Individual or group delivery`, regex("individual", ignore_case = TRUE)) ~ "Individual-based",
+      TRUE ~ "Unclear"
+    )
+  )
+
+```
+
+
+# Map of studies
+This map shows where each study in the review was conducted. Click on the pin to see details about the study including how many people took part and what kind of intervention was used. Zoom in to click on each pin.
+
+
+
+```{r}
+# Optional: keep only needed columns
+dta_plot <- dta %>%
+  select(`Authors (year of publication)`, Country,  `Number of participants`,`Study setting`, `Program description`)
+
+set.seed(123)
+# Geocode countries to lat/lon using tidygeocoder
+dta_plot <- dta_plot %>%
+  geocode(Country, method = "osm", lat = latitude, long = longitude) %>% 
+  mutate(
+    lat = jitter(latitude, amount = 5),
+    lon = jitter(longitude, amount = 5)
+  ) %>% 
+  group_by(Country) %>% 
+  mutate( n=n(), 
+          lat=ifelse(n==1, latitude,lat),
+          lon=ifelse(n==1, longitude,lon)) %>% 
+  ungroup()
+
+
+```
+
+
+
+
+```{r,fig.width=12,fig.height=6}
+
+# Create popup text
+dta_plot <- dta_plot %>%
+  mutate(popup = paste0(
+    "<strong>", `Authors (year of publication)`, "</strong><br/>",
+    "Country: ", Country, "<br/>",
+    "Number of participants: ", `Number of participants`, "<br/>",
+    "Study setting: ", `Study setting`, "<br/>",
+    "Program description: ", `Program description`
+  ))
+
+orygen_icon <- makeIcon(
+  iconUrl = "Orygen.png",        # Path to image (ensure it's in working dir or adjust path)
+  iconWidth = 30,                # Adjust size as needed
+  iconHeight = 30,
+  iconAnchorX = 15,              # Anchor in center of icon
+  iconAnchorY = 30
+)
+
+# Create leaflet map with default markers
+m <- leaflet() %>%
+  addProviderTiles("CartoDB.Positron")
+
+for (i in seq_len(nrow(dta_plot))) {
+  m <- addMarkers(
+    map = m,
+    lng = dta_plot$lon[i],
+    lat = dta_plot$lat[i],
+    popup = dta_plot$popup[i],
+    icon = orygen_icon
+  )
+}
+
+m
+
+
+```
+
+
+
+
+# Study settings 
+
+
+This figure shows the types of settings where interventions were delivered – including education, digital/online, home-based, clinical/health services, and other settings. The size of each rectangle reflects the number of participants in the study. Hover over each study to see the setting, sample size, and type of program. 
+
+
+
+```{r,fig.height=6,fig.width=12}
+# Step 1: Prepare data with parent values
+plot_dta <- dta %>%
+  rename(
+    Authors = `Authors (year of publication)`,
+    Group = StudySettingGroup,
+    N = `Number of participants`,
+    Support = `Social support element`
+  ) %>%
+  mutate(
+    N = as.numeric(N),
+    Support = str_wrap(Support, 30)
+  )
+
+# Step 2: Create top-level nodes
+top_nodes <- plot_dta %>%
+  group_by(Group) %>%
+  summarise(N = sum(N), .groups = "drop") %>%
+  mutate(
+    Authors = Group,
+    Group = "",  # root
+    Support = NA_character_
+  )
+
+# Step 3: Combine study-level and top-level rows
+treemap_data <- bind_rows(plot_dta, top_nodes)
+
+# Step 4: Define group colors
+group_colors <- c(
+  "Clinic/Health service"     = "#1E3510",
+  "Digital/Online"            = "#6D7C64",
+  "Education setting-based"   = "#9AA493",
+  "Home-based"                = "#D2D7CF",
+  "Other"                     = "#F4F5F3"
+)
+
+# Step 5: Add color and formatted hover text inside mutate
+treemap_data <- treemap_data %>%
+  mutate(
+    group_label = ifelse(Group == "", Authors, Group),
+    color = group_colors[group_label],
+    hover_text = paste0(
+      "<b>", Authors, "</b><br>",
+      "Setting: ", ifelse(Group == "", "Top-level", group_label), "<br>",
+      "Sample size: ", N, "<br>",
+      "Support: <br>", ifelse(is.na(Support), "Not reported", str_replace_all(Support, "\\n", "<br>"))
+    )
+  )
+
+# Step 6: Plot with HTML-formatted text hover
+plot_ly(
+  data = treemap_data,
+  type = "treemap",
+  labels = ~Authors,
+  parents = ~Group,
+  values = ~N,
+  branchvalues = "total",
+  textinfo = "label",
+  text = ~hover_text,
+  hoverinfo = "text",
+  marker = list(colors = treemap_data$color)
+)
+
+
+```
+
+
+
+
+
+
+
+# Characteristics of studies 
+
+
+This table summarises key details from each study included in the review. Use the boxes in the second row to search for specific characteristics.
+
+```{r}
+dta <- read_excel("WIP Summary table_V3.xlsx")
+reactable(dta,
+  searchable = TRUE,
+  filterable = TRUE,
+  highlight = TRUE,
+  striped = TRUE,
+  bordered = TRUE,
+  resizable = TRUE,
+  defaultPageSize = 10)
+```
+
+
+
